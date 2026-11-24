@@ -1,0 +1,12 @@
+node_modules/
+out/
+cache/
+dist/
+broadcast/
+.env
+.env.*
+!.env.example
+data/
+*.log
+.vercel
+.DS_Store

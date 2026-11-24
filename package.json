@@ -1,0 +1,20 @@
+{
+  "name": "onlywhales",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "test": "pnpm test:contracts && pnpm test:server",
+    "test:contracts": "forge test",
+    "test:server": "vitest run",
+    "abi": "node scripts/export-abi.mjs",
+    "chain": "bash scripts/local-chain.sh"
+  },
+  "devDependencies": {
+    "@openzeppelin/contracts": "^5.6.1"
+  }
+}
