@@ -25,11 +25,21 @@ import {WhalePass} from "./WhalePass.sol";
 ///    price feed nor a broken DAO address can trap principal.
 ///
 ///  Time accounting. "Days staked" counts locked time only: time elapsed inside a lock, summed
-///  across relocks. A position whose lock ran out stops counting (and should stop earning) until
-///  it is relocked. Three state transitions happen at a moment in time rather than in a
-///  transaction: a lock expiring, a staker crossing 1024 days, and a minimum-raise boost taking
-///  effect. They are applied lazily the next time the position is touched, and `sync` is
-///  permissionless so anyone can apply them for any position at any time.
+///  across relocks. Locks end on a UTC day boundary.
+///
+///  Lock expiry is exact and needs no keeper. Every lock end is recorded in a per-day bucket; the
+///  first transaction on or after that day removes the expired weight from the pots and
+///  checkpoints the reward accumulators, before any slash is distributed. An expired position
+///  earns up to its lock end and not one wei after, whether or not anyone ever syncs it.
+///
+///  Letting a lock lapse has a price, so nobody can sit liquid and jump back in front of a slash:
+///   - time weight in the pot restarts from zero on the next relock (the day count is kept), and
+///   - a whale with 1024+ days rejoins the elder pot only 30 days into the new lock.
+///  Relocking before the lock ends keeps everything.
+///
+///  Two transitions are applied lazily, the next time the position is touched: a staker crossing
+///  1024 days and a minimum-raise boost taking effect. `sync` is permissionless, and both only
+///  ever help the position's owner.
 contract OnlyWhalesVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
     using Timelocked for Timelocked.Uint;
@@ -71,8 +81,25 @@ contract OnlyWhalesVault is ReentrancyGuard {
         uint40 lockEnd;
         uint40 lockDuration;
         uint40 accrued; // locked seconds completed in earlier locks
+        uint40 elderAt; // earliest moment this position may join the 1024-day pot
         uint32 raiseCursor; // next entry of `_raises` to apply
         bool elder; // currently in the 1024-day pot
+    }
+
+    /// @dev Weight that leaves the pots when the locks ending on a given day expire.
+    struct Expiry {
+        uint256 a;
+        uint256 aS;
+        uint256 elderA;
+        uint256 elderAS;
+    }
+
+    /// @dev Reward accumulators as they stood at a day boundary on which locks expired.
+    struct Checkpoint {
+        uint256 accP;
+        uint256 accQ;
+        uint256 elderAccP;
+        uint256 elderAccQ;
     }
 
     struct Pool {
@@ -81,6 +108,9 @@ contract OnlyWhalesVault is ReentrancyGuard {
         uint256 totalPrincipal;
         uint256 rewardReserve; // slash distributed to whales and not yet claimed
         uint256 daoOwed; // fees + DAO share of slashes, waiting for `sweepDao`
+        uint256 lastDay; // last UTC day whose expiries have been processed
+        mapping(uint256 day => Expiry) expiries;
+        mapping(uint256 day => Checkpoint) checkpoints;
     }
 
     struct Raise {
@@ -100,6 +130,7 @@ contract OnlyWhalesVault is ReentrancyGuard {
         uint256 slashWad;
         uint256 slashAmount;
         uint256 earned;
+        uint256 elderAt;
         bool locked;
         bool elder;
         bool needsSync;
@@ -141,9 +172,13 @@ contract OnlyWhalesVault is ReentrancyGuard {
     /// @notice Before anyone has 1024 days, the whale 80% splits 90% stakers / 10% DAO.
     uint256 public constant PRE_ELDER_DAO_BPS = 1_000;
 
-    /// @notice Ceiling on a position's stacked boost. Keeps weight math far from overflow no
-    ///         matter how many times the minimum is raised.
-    uint256 public constant MAX_BOOST_WAD = 1_000_000e18;
+    /// @notice A whale with 1024+ days who let a lock lapse rejoins the elder pot this long
+    ///         into the new lock.
+    uint256 public constant ELDER_REJOIN_DELAY = 30 days;
+
+    /// @notice Ceiling on a position's stacked boost: 100x, the largest single raise the hard
+    ///         range allows ($10k to $1M). Cycling the minimum up and down cannot go past it.
+    uint256 public constant MAX_BOOST_WAD = (DEPOSIT_USD_MAX / DEPOSIT_USD_MIN) * 1e18;
 
     uint256 public constant TIER_COUNT = 10;
 
@@ -194,7 +229,7 @@ contract OnlyWhalesVault is ReentrancyGuard {
     event Claimed(address indexed wallet, uint8 indexed pool, uint256 amount);
     event DaoSwept(uint8 indexed pool, address indexed to, uint256 amount);
     event LockExpired(address indexed wallet, uint8 indexed pool, uint256 stakedSeconds);
-    event BecameElder(address indexed wallet, uint8 indexed pool);
+    event JoinedElders(address indexed wallet, uint8 indexed pool);
     event BoostApplied(address indexed wallet, uint8 indexed pool, uint256 boostWad);
     event PassTierChanged(address indexed wallet, uint8 tier);
 
@@ -211,6 +246,7 @@ contract OnlyWhalesVault is ReentrancyGuard {
     error MinAboveMax();
     error BadPool();
     error BadTier();
+    error BadURI();
     error BadLock();
     error ZeroAmount();
     error PositionExists();
@@ -248,8 +284,11 @@ contract OnlyWhalesVault is ReentrancyGuard {
         _params[Param.MaxDeposit].current = c.maxDepositUsd;
         _params[Param.DaoWallet].current = uint256(uint160(c.daoWallet));
         for (uint256 i; i < TIER_COUNT; ++i) {
+            _checkURI(c.tierURIs[i]);
             _tierURIs[i].current = c.tierURIs[i];
         }
+        _pools[POOL_USDC].lastDay = block.timestamp / 1 days;
+        _pools[POOL_BNB].lastDay = block.timestamp / 1 days;
     }
 
     modifier onlyOperator() {
@@ -292,6 +331,7 @@ contract OnlyWhalesVault is ReentrancyGuard {
         uint256 principal = gross - fee;
 
         Pool storage ps = _pools[pool];
+        _advance(ps, type(uint256).max);
         ps.daoOwed += fee;
         ps.totalPrincipal += principal;
 
@@ -299,8 +339,10 @@ contract OnlyWhalesVault is ReentrancyGuard {
         p.grossUsd = usdValue;
         p.boostWad = WAD;
         p.lockStart = uint40(block.timestamp);
-        p.lockEnd = uint40(block.timestamp + lockDuration);
+        p.lockEnd = uint40(_lockEnd(lockDuration));
         p.lockDuration = uint40(lockDuration);
+        p.vstart = block.timestamp - genesis;
+        p.elderAt = uint40(block.timestamp + ELDER_SECONDS);
         p.raiseCursor = uint32(_maturedRaises());
         _enter(ps, p, wallet, pool);
 
@@ -314,6 +356,8 @@ contract OnlyWhalesVault is ReentrancyGuard {
 
     /// @notice Start a fresh lock on an existing position. Days staked carry over.
     /// @dev The slash curve restarts at 100%. The new lock can never end before the current one.
+    ///      Relock while still locked and nothing is lost. Relock after the lock lapsed and time
+    ///      weight restarts from zero, and a 1024-day whale waits 30 days to rejoin the elder pot.
     function relock(uint8 pool, uint256 lockDuration) external nonReentrant {
         _checkPool(pool);
         if (lockDuration < MIN_LOCK || lockDuration > MAX_LOCK) revert BadLock();
@@ -321,14 +365,20 @@ contract OnlyWhalesVault is ReentrancyGuard {
 
         Position storage p = _positions[pool][msg.sender];
         if (p.amount == 0) revert NoPosition();
-        uint256 newEnd = block.timestamp + lockDuration;
+        uint256 newEnd = _lockEnd(lockDuration);
         if (newEnd < p.lockEnd) revert CannotShortenLock();
 
         Pool storage ps = _pools[pool];
         if (p.weight != 0) {
-            // Still locked (sync would have expired it otherwise): bank the time served so far.
+            // Still locked: bank the time served. `vstart` and `elderAt` carry over untouched.
             _leave(ps, p);
             p.accrued += uint40(block.timestamp - p.lockStart);
+        } else {
+            // Lapsed: the day count is kept, the time weight and elder seat are not.
+            p.vstart = block.timestamp - genesis;
+            uint256 remaining = p.accrued >= ELDER_SECONDS ? 0 : ELDER_SECONDS - p.accrued;
+            if (remaining < ELDER_REJOIN_DELAY) remaining = ELDER_REJOIN_DELAY;
+            p.elderAt = uint40(block.timestamp + remaining);
         }
         p.lockStart = uint40(block.timestamp);
         p.lockEnd = uint40(newEnd);
@@ -419,34 +469,64 @@ contract OnlyWhalesVault is ReentrancyGuard {
 
     // ====================================================================== sync
 
-    /// @notice Apply everything that happened to a position by the clock alone: boosts from
-    ///         minimum raises, lock expiry, and crossing 1024 days. Anyone can call for anyone.
+    /// @notice Apply what the clock did to a position: boosts from minimum raises, crossing
+    ///         1024 days, and tidying up after a lock expired. Anyone can call for anyone.
     function sync(address wallet, uint8 pool) external nonReentrant {
         _checkPool(pool);
         _sync(wallet, pool);
     }
 
+    /// @notice Process expired locks for up to `maxDays` days. Every other function does this
+    ///         in full by itself; this exists so a pool that sat untouched for years can be
+    ///         caught up in several small transactions instead of one large one.
+    function advance(uint8 pool, uint256 maxDays) external nonReentrant {
+        _checkPool(pool);
+        _advance(_pools[pool], maxDays);
+    }
+
+    /// @dev Walk forward day by day. On each day that had locks ending, checkpoint the reward
+    ///      accumulators and take the expired weight out of the pots. No slash is ever
+    ///      distributed before this has run up to today, so the accumulators seen here are
+    ///      exactly what they were at that day boundary. One storage read per quiet day.
+    function _advance(Pool storage ps, uint256 maxDays) private {
+        uint256 today = block.timestamp / 1 days;
+        uint256 day = ps.lastDay;
+        if (day >= today) return;
+        uint256 end = today - day > maxDays ? day + maxDays : today;
+        while (day < end) {
+            unchecked {
+                ++day;
+            }
+            Expiry storage e = ps.expiries[day];
+            uint256 a = e.a;
+            if (a == 0) continue;
+            ps.checkpoints[day] = Checkpoint({
+                accP: ps.stakers.accP,
+                accQ: ps.stakers.accQ,
+                elderAccP: ps.elders.accP,
+                elderAccQ: ps.elders.accQ
+            });
+            ps.stakers.removeAggregate(a, e.aS);
+            if (e.elderA != 0) ps.elders.removeAggregate(e.elderA, e.elderAS);
+            delete ps.expiries[day];
+        }
+        ps.lastDay = day;
+    }
+
     function _sync(address wallet, uint8 pool) private {
+        Pool storage ps = _pools[pool];
+        _advance(ps, type(uint256).max);
         Position storage p = _positions[pool][wallet];
         if (p.amount == 0) return;
-        Pool storage ps = _pools[pool];
 
-        // 1. Settle what the stored weight has earned so far.
+        // 1. Settle what the stored weight earned, up to now or up to its lock end.
         bool active = p.weight != 0;
         if (active) {
-            uint256 owed = ps.stakers.earned(p.weight, p.vstart, p.snapP, p.snapQ);
-            p.snapP = ps.stakers.accP;
-            p.snapQ = ps.stakers.accQ;
-            if (p.elder) {
-                owed += ps.elders.earned(p.weight, p.vstart, p.elderSnapP, p.elderSnapQ);
-                p.elderSnapP = ps.elders.accP;
-                p.elderSnapQ = ps.elders.accQ;
-            }
+            uint256 owed = _earned(ps, p, true);
             if (owed != 0) unclaimed[pool][wallet] += owed;
         }
 
-        // 2. Minimum-raise boosts that took effect since the last touch. An expired position
-        //    keeps its boost for the next relock.
+        // 2. Minimum-raise boosts that took effect since the last touch.
         (uint256 boostWad, uint256 cursor) = _boostNow(p);
         bool boosted = boostWad != p.boostWad;
         if (cursor != p.raiseCursor) p.raiseCursor = uint32(cursor);
@@ -456,47 +536,90 @@ contract OnlyWhalesVault is ReentrancyGuard {
         }
         if (!active) return;
 
-        // 3. Lock expiry, re-weigh, or graduation.
+        // 3. Expired, re-weighed, or graduated.
         if (block.timestamp >= p.lockEnd) {
-            _leave(ps, p);
+            // `_advance` already removed this weight from the pots at the day boundary.
+            p.weight = 0;
+            p.elder = false;
             p.accrued += p.lockEnd - p.lockStart;
             p.lockStart = p.lockEnd;
             emit LockExpired(wallet, pool, p.accrued);
         } else if (boosted) {
             _leave(ps, p);
             _enter(ps, p, wallet, pool);
-        } else if (!p.elder && _stakedSeconds(p, block.timestamp) >= ELDER_SECONDS) {
-            p.elder = true;
-            ps.elders.join(p.weight, p.vstart);
-            p.elderSnapP = ps.elders.accP;
-            p.elderSnapQ = ps.elders.accQ;
-            emit BecameElder(wallet, pool);
+        } else if (!p.elder && block.timestamp >= p.elderAt) {
+            _joinElders(ps, p, wallet, pool);
         }
+    }
+
+    /// @dev Earnings of the stored weight since its snapshots. For a position past its lock end
+    ///      the accumulators are read from the checkpoint taken at that day boundary (or are
+    ///      still unchanged since then, if the day has not been processed yet).
+    function _earned(Pool storage ps, Position storage p, bool write) private returns (uint256 owed) {
+        (uint256 accP, uint256 accQ, uint256 elderAccP, uint256 elderAccQ) = _accumulatorsFor(ps, p);
+        owed = TimeWeightedPot.earned(p.weight, p.vstart, accP, accQ, p.snapP, p.snapQ);
+        if (p.elder) owed += TimeWeightedPot.earned(p.weight, p.vstart, elderAccP, elderAccQ, p.elderSnapP, p.elderSnapQ);
+        if (write) {
+            p.snapP = accP;
+            p.snapQ = accQ;
+            if (p.elder) {
+                p.elderSnapP = elderAccP;
+                p.elderSnapQ = elderAccQ;
+            }
+        }
+    }
+
+    function _accumulatorsFor(Pool storage ps, Position storage p)
+        private
+        view
+        returns (uint256, uint256, uint256, uint256)
+    {
+        uint256 endDay = p.lockEnd / 1 days;
+        if (endDay <= ps.lastDay) {
+            Checkpoint storage c = ps.checkpoints[endDay];
+            return (c.accP, c.accQ, c.elderAccP, c.elderAccQ);
+        }
+        return (ps.stakers.accP, ps.stakers.accQ, ps.elders.accP, ps.elders.accQ);
     }
 
     /// @dev Put a locked position into the pots with its current amount, lock and boost.
-    ///      `lockStart` must be `block.timestamp` or the position must still be inside its lock.
+    ///      Caller has set the lock fields, `vstart` and `elderAt`.
     function _enter(Pool storage ps, Position storage p, address wallet, uint8 pool) private {
-        uint256 staked = _stakedSeconds(p, block.timestamp);
-        p.weight = Math.mulDiv(p.amount * p.lockDuration, p.boostWad, WAD);
-        p.vstart = block.timestamp - genesis - staked;
-        ps.stakers.join(p.weight, p.vstart);
+        uint256 w = Math.mulDiv(p.amount * p.lockDuration, p.boostWad, WAD);
+        p.weight = w;
+        ps.stakers.join(w, p.vstart);
         p.snapP = ps.stakers.accP;
         p.snapQ = ps.stakers.accQ;
-        if (staked >= ELDER_SECONDS) {
-            if (!p.elder) emit BecameElder(wallet, pool);
-            p.elder = true;
-            ps.elders.join(p.weight, p.vstart);
-            p.elderSnapP = ps.elders.accP;
-            p.elderSnapQ = ps.elders.accQ;
-        }
+        Expiry storage e = ps.expiries[p.lockEnd / 1 days];
+        e.a += w;
+        e.aS += w * p.vstart;
+        if (block.timestamp >= p.elderAt) _joinElders(ps, p, wallet, pool);
     }
 
-    /// @dev Remove a position's weight from the pots. Caller settles first and resets `weight`.
+    function _joinElders(Pool storage ps, Position storage p, address wallet, uint8 pool) private {
+        p.elder = true;
+        ps.elders.join(p.weight, p.vstart);
+        p.elderSnapP = ps.elders.accP;
+        p.elderSnapQ = ps.elders.accQ;
+        Expiry storage e = ps.expiries[p.lockEnd / 1 days];
+        e.elderA += p.weight;
+        e.elderAS += p.weight * p.vstart;
+        emit JoinedElders(wallet, pool);
+    }
+
+    /// @dev Take a still-locked position out of the pots and out of its expiry bucket.
+    ///      Caller settles first.
     function _leave(Pool storage ps, Position storage p) private {
-        ps.stakers.leave(p.weight, p.vstart);
+        uint256 w = p.weight;
+        uint256 wS = w * p.vstart;
+        Expiry storage e = ps.expiries[p.lockEnd / 1 days];
+        ps.stakers.leave(w, p.vstart);
+        e.a -= w;
+        e.aS -= wS;
         if (p.elder) {
-            ps.elders.leave(p.weight, p.vstart);
+            ps.elders.leave(w, p.vstart);
+            e.elderA -= w;
+            e.elderAS -= wS;
             p.elder = false;
         }
         p.weight = 0;
@@ -524,6 +647,21 @@ contract OnlyWhalesVault is ReentrancyGuard {
         if (pool > POOL_BNB) revert BadPool();
     }
 
+    /// @dev Locks end at the first UTC midnight on or after `now + lockDuration`.
+    function _lockEnd(uint256 lockDuration) private view returns (uint256) {
+        return ((block.timestamp + lockDuration + 1 days - 1) / 1 days) * 1 days;
+    }
+
+    /// @dev Artwork URIs are embedded in the pass's JSON metadata, so no quotes, backslashes
+    ///      or control characters.
+    function _checkURI(string memory uri) private pure {
+        bytes memory b = bytes(uri);
+        if (b.length > 512) revert BadURI();
+        for (uint256 i; i < b.length; ++i) {
+            if (b[i] < 0x20 || b[i] == 0x22 || b[i] == 0x5c || b[i] == 0x7f) revert BadURI();
+        }
+    }
+
     // ============================================================ time and boost
 
     /// @dev Locked seconds served as of `t`. Stops counting at `lockEnd`.
@@ -548,15 +686,16 @@ contract OnlyWhalesVault is ReentrancyGuard {
 
     /// @dev Boost after applying every matured raise the position has not seen yet:
     ///        boost *= 1 + (newMin/oldMin - 1) * min(stakedDays / 1024, 1)
-    ///      using days staked at the moment each raise took effect. One iteration per raise the
-    ///      position missed; raises are at least 7 days apart, so this is bounded by time, not
-    ///      by the number of stakers.
+    ///      using days staked at the moment each raise took effect. Only a position that was
+    ///      locked at that moment is boosted. One iteration per raise the position missed;
+    ///      raises are at least 7 days apart, so this is bounded by time, not by stakers.
     function _boostNow(Position storage p) private view returns (uint256 boostWad, uint256 cursor) {
         boostWad = p.boostWad;
         cursor = p.raiseCursor;
         uint256 matured = _maturedRaises();
         for (; cursor < matured; ++cursor) {
             Raise memory r = _raises[cursor];
+            if (r.eta >= p.lockEnd) continue; // not locked when it landed
             uint256 staked = _stakedSeconds(p, r.eta);
             if (staked > ELDER_SECONDS) staked = ELDER_SECONDS;
             uint256 factor = WAD + ((uint256(r.ratioWad) - WAD) * staked) / ELDER_SECONDS;
@@ -615,6 +754,7 @@ contract OnlyWhalesVault is ReentrancyGuard {
     /// @notice Queue new artwork for a pass tier. Same 7-day timelock.
     function queueTierURI(uint8 tier, string calldata uri) external onlyOperator {
         if (tier >= TIER_COUNT) revert BadTier();
+        _checkURI(uri);
         uint64 eta = _tierURIs[tier].queue(uri, TIMELOCK);
         emit TierURIQueued(tier, uri, eta);
     }
@@ -690,8 +830,12 @@ contract OnlyWhalesVault is ReentrancyGuard {
         if (p.amount == 0) return v;
 
         if (p.weight != 0) {
-            v.earned += ps.stakers.earned(p.weight, p.vstart, p.snapP, p.snapQ);
-            if (p.elder) v.earned += ps.elders.earned(p.weight, p.vstart, p.elderSnapP, p.elderSnapQ);
+            (uint256 accP, uint256 accQ, uint256 elderAccP, uint256 elderAccQ) = _accumulatorsFor(ps, p);
+            v.earned += TimeWeightedPot.earned(p.weight, p.vstart, accP, accQ, p.snapP, p.snapQ);
+            if (p.elder) {
+                v.earned +=
+                    TimeWeightedPot.earned(p.weight, p.vstart, elderAccP, elderAccQ, p.elderSnapP, p.elderSnapQ);
+            }
         }
 
         (uint256 boostWad,) = _boostNow(p);
@@ -706,19 +850,36 @@ contract OnlyWhalesVault is ReentrancyGuard {
         v.weight = v.locked ? Math.mulDiv(p.amount * p.lockDuration, boostWad, WAD) : 0;
         v.slashWad = _slashWad(p);
         v.slashAmount = Math.mulDiv(p.amount, v.slashWad, WAD, Math.Rounding.Ceil);
-        v.elder = v.locked && v.stakedSeconds >= ELDER_SECONDS;
-        v.needsSync = v.weight != p.weight || v.elder != p.elder;
+        v.elder = v.locked && block.timestamp >= p.elderAt;
+        v.elderAt = p.elderAt;
+        // True when a sync would raise this position's weight or seat it in the elder pot.
+        v.needsSync = v.locked && (v.weight != p.weight || v.elder != p.elder);
     }
 
     function poolInfo(uint8 pool) external view returns (PoolView memory v) {
         _checkPool(pool);
         Pool storage ps = _pools[pool];
-        uint256 t = block.timestamp - genesis;
         v.totalPrincipal = ps.totalPrincipal;
         v.rewardReserve = ps.rewardReserve;
         v.daoOwed = ps.daoOwed;
-        v.stakerWeight = ps.stakers.weightAt(t);
-        v.elderWeight = ps.elders.weightAt(t);
+
+        // Pot sums as they will be once expired days are processed.
+        uint256 a = ps.stakers.sumA;
+        uint256 aS = ps.stakers.sumAS;
+        uint256 elderA = ps.elders.sumA;
+        uint256 elderAS = ps.elders.sumAS;
+        uint256 today = block.timestamp / 1 days;
+        for (uint256 day = ps.lastDay + 1; day <= today; ++day) {
+            Expiry storage e = ps.expiries[day];
+            if (e.a == 0) continue;
+            a -= e.a;
+            aS -= e.aS;
+            elderA -= e.elderA;
+            elderAS -= e.elderAS;
+        }
+        uint256 t = block.timestamp - genesis;
+        v.stakerWeight = a * t - aS;
+        v.elderWeight = elderA * t - elderAS;
         v.elderPhase = v.elderWeight != 0;
     }
 

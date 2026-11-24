@@ -172,11 +172,10 @@ contract BoostTest is Base {
     }
 
     function test_Boost_SurvivesExpiryAndRelock() public {
-        _depositUSDC(alice, 300_000e18, 512 days);
+        _depositUSDC(alice, 300_000e18, 600 days);
         _skip(512 days - 7 days);
-        _queue(MIN, 400_000e18);
-        _skip(7 days + 30 days); // lock expired at the eta; boost uses 512 days served
-        vault.sync(alice, USDC);
+        _queue(MIN, 400_000e18); // lands at day 512, while still locked
+        _skip(7 days + 200 days); // lock ran out at day 600
         assertEq(_pos(alice, USDC).boostWad, 1.5e18);
         assertEq(_pos(alice, USDC).weight, 0);
 
@@ -185,8 +184,29 @@ contract BoostTest is Base {
         assertEq(_pos(alice, USDC).weight, (PRINCIPAL * 100 days * 15) / 10);
     }
 
-    function test_Boost_HardCeiling() public {
-        // An operator cycling the minimum up and down cannot push weight math anywhere near overflow.
+    function test_Boost_OnlyPositionsLockedWhenTheRaiseLands() public {
+        _depositUSDC(alice, 300_000e18, 512 days);
+        _skip(512 days); // expired, sitting liquid
+        _queue(MIN, 1_000_000e18);
+        _skip(7 days);
+        vault.sync(alice, USDC);
+        assertEq(_pos(alice, USDC).boostWad, 1e18, "idle positions bank no boost");
+
+        vm.prank(alice);
+        vault.relock(USDC, 100 days);
+        assertEq(_pos(alice, USDC).boostWad, 1e18);
+    }
+
+    function test_Boost_RaiseLandingExactlyAtLockEndDoesNotCount() public {
+        _depositUSDC(alice, 300_000e18, 512 days);
+        _skip(512 days - 7 days);
+        _queue(MIN, 400_000e18); // eta == lockEnd
+        _skip(7 days);
+        assertEq(_pos(alice, USDC).boostWad, 1e18);
+    }
+
+    function test_Boost_HardCeiling_OneHundredX() public {
+        // Cycling the minimum up and down buys nothing past the largest single raise ($10k -> $1M).
         vault = _deploy(300, 10_000e18, 1_000_000e18);
         _depositUSDC(alice, 300_000e18, 1024 days);
         _skip(1000 days);
@@ -199,7 +219,8 @@ contract BoostTest is Base {
             _queue(MIN, 10_000e18);
             _skip(7 days);
         }
-        assertEq(_pos(alice, USDC).boostWad, vault.MAX_BOOST_WAD());
+        assertEq(vault.MAX_BOOST_WAD(), 100e18);
+        assertEq(_pos(alice, USDC).boostWad, 100e18);
         vault.sync(alice, USDC);
         _skip(1024 days);
         (uint256 payout,) = _withdraw(alice, USDC);

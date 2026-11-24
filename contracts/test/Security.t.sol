@@ -12,7 +12,7 @@ contract SecurityTest is Base {
     /// Every state-changing function the vault has. If someone adds a pause, an upgrade hook,
     /// an owner transfer or a rescue function, this test fails until the list is edited by hand.
     function test_WriteSurface_IsExactlyThis() public view {
-        string[11] memory allowed = [
+        string[12] memory allowed = [
             "depositUSDC",
             "depositBNB",
             "relock",
@@ -20,6 +20,7 @@ contract SecurityTest is Base {
             "claim",
             "sweepDao",
             "sync",
+            "advance",
             "queueChange",
             "cancelChange",
             "queueTierURI",
@@ -204,6 +205,8 @@ contract SecurityTest is Base {
         assertEq(vault.SLASH_DAO_BPS(), 2_000);
         assertEq(vault.PRE_ELDER_DAO_BPS(), 1_000);
         assertEq(vault.ELDER_SECONDS(), 1024 days);
+        assertEq(vault.ELDER_REJOIN_DELAY(), 30 days);
+        assertEq(vault.MAX_BOOST_WAD(), 100e18);
         assertEq(address(vault.usdc()), address(usdc));
         assertEq(address(vault.bnbUsdFeed()), address(feed));
         assertEq(vault.oracleStaleness(), STALENESS);

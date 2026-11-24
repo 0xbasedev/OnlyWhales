@@ -116,6 +116,10 @@ contract Handler is Test {
         vault.sync(_actor(seed), pool % 2);
     }
 
+    function advance(uint8 pool, uint256 maxDays) external {
+        vault.advance(pool % 2, bound(maxDays, 0, 400));
+    }
+
     function sweepDao(uint8 pool) external {
         pool = pool % 2;
         try vault.sweepDao(pool) returns (uint256 amount) {
@@ -155,7 +159,7 @@ contract InvariantTest is Test {
     address internal dao = makeAddr("dao");
 
     function setUp() public {
-        vm.warp(1_750_000_000);
+        vm.warp(1_750_032_000);
         usdc = new MockUSDC();
         feed = new MockFeed(8, 600e8);
         string[10] memory uris;

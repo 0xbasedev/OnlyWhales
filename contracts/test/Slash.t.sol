@@ -59,11 +59,14 @@ contract SlashTest is Base {
         lock = bound(lock, 30 days, 1024 days);
         elapsed = bound(elapsed, 0, lock - 1);
         _depositUSDC(alice, 300_000e18, lock);
+        uint256 actual = _pos(alice, USDC).lockEnd - block.timestamp; // rounded up to UTC midnight
+        assertGe(actual, lock);
+        assertLt(actual, lock + 1 days);
         _skip(elapsed);
         uint256 slashWad = _pos(alice, USDC).slashWad;
         assertLe(slashWad, 1e18);
         assertGt(slashWad, 0.3e18);
-        assertApproxEqAbs(slashWad, 1e18 - (0.7e18 * elapsed) / lock, 1);
+        assertApproxEqAbs(slashWad, 1e18 - (0.7e18 * elapsed) / actual, 1);
     }
 
     function test_WithdrawWithoutPositionReverts() public {
@@ -187,21 +190,18 @@ contract SlashTest is Base {
 
     // ----------------------------------------------------------- lock expiry
 
-    function test_ExpiredLock_StopsEarningOnceSynced() public {
+    function test_ExpiredLock_StopsEarningAtLockEnd_NobodyHasToSync() public {
         _depositUSDC(alice, 300_000e18, 30 days);
         _depositUSDC(bob, 300_000e18, 365 days);
         _skip(60 days);
 
         OnlyWhalesVault.PositionView memory a = _pos(alice, USDC);
         assertFalse(a.locked);
-        assertEq(a.weight, 0, "view already shows no weight");
-        assertTrue(a.needsSync);
+        assertEq(a.weight, 0);
+        assertFalse(a.needsSync, "expiry is exact, no keeper needed");
         assertEq(a.stakedSeconds, 30 days, "days stop counting at lock end");
 
-        vm.prank(carol); // anyone can sync anyone
-        vault.sync(alice, USDC);
-        assertFalse(_pos(alice, USDC).needsSync);
-
+        // Alice is never synced.
         _depositUSDC(carol, 300_000e18, 30 days);
         _skip(1);
         (, uint256 slashed) = _withdraw(carol, USDC);
@@ -342,18 +342,23 @@ contract SlashTest is Base {
         assertApproxEqAbs(_pos(bob, USDC).earned, (pot * 2) / 3, DUST);
     }
 
-    function test_MaxLock_ExpiresAt1024_ThenRelockJoinsElders() public {
+    function test_MaxLock_ExpiresAt1024_ThenRelockRejoinsEldersAfterDelay() public {
         _depositUSDC(alice, 300_000e18, 1024 days);
         _skip(1024 days);
-        vault.sync(alice, USDC);
         OnlyWhalesVault.PositionView memory p = _pos(alice, USDC);
         assertEq(p.stakedSeconds, 1024 days);
         assertFalse(p.elder, "an expired lock is not in the pot");
         assertFalse(_pool(USDC).elderPhase);
 
+        // She let it lapse, so the elder seat opens 30 days into the new lock, not instantly.
         vm.prank(alice);
-        vault.relock(USDC, 30 days);
+        vault.relock(USDC, 60 days);
+        assertFalse(_pos(alice, USDC).elder);
+        assertFalse(_pool(USDC).elderPhase);
+
+        _skip(30 days);
         assertTrue(_pos(alice, USDC).elder);
+        vault.sync(alice, USDC);
         assertTrue(_pool(USDC).elderPhase);
     }
 
@@ -408,6 +413,6 @@ contract SlashTest is Base {
         assertEq(before.totalPrincipal - aft.totalPrincipal, principal);
         assertLe(_pos(bob, pool).earned, aft.rewardReserve, "claims never exceed the reserve");
         assertEq(vaultAfter, aft.totalPrincipal + aft.rewardReserve + aft.daoOwed, "vault covers what it owes");
-        if (elapsed >= lock) assertEq(slashed, 0);
+        if (elapsed >= lock + 1 days) assertEq(slashed, 0);
     }
 }

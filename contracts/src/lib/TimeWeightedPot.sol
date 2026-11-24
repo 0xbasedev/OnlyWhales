@@ -39,6 +39,12 @@ library TimeWeightedPot {
         pot.sumAS -= a * s;
     }
 
+    /// @dev Remove an aggregate of members at once: `a = Σ a_i`, `aS = Σ a_i·s_i`.
+    function removeAggregate(Pot storage pot, uint256 a, uint256 aS) internal {
+        pot.sumA -= a;
+        pot.sumAS -= aS;
+    }
+
     /// @dev Caller must have checked `weightAt(t) > 0`.
     function distribute(Pot storage pot, uint256 amount, uint256 t) internal {
         uint256 w = weightAt(pot, t);
@@ -46,13 +52,15 @@ library TimeWeightedPot {
         pot.accQ += Math.mulDiv(amount, PRECISION, w, Math.Rounding.Ceil);
     }
 
-    function earned(Pot storage pot, uint256 a, uint256 s, uint256 snapP, uint256 snapQ)
+    /// @dev What weight `a` started at `s` earned between a snapshot and accumulator values
+    ///      (`accP`, `accQ`), which are either the live ones or a checkpoint taken at lock end.
+    function earned(uint256 a, uint256 s, uint256 accP, uint256 accQ, uint256 snapP, uint256 snapQ)
         internal
-        view
+        pure
         returns (uint256)
     {
-        uint256 plus = Math.mulDiv(a, pot.accP - snapP, PRECISION);
-        uint256 minus = Math.mulDiv(a * s, pot.accQ - snapQ, PRECISION, Math.Rounding.Ceil);
+        uint256 plus = Math.mulDiv(a, accP - snapP, PRECISION);
+        uint256 minus = Math.mulDiv(a * s, accQ - snapQ, PRECISION, Math.Rounding.Ceil);
         return plus > minus ? plus - minus : 0;
     }
 }

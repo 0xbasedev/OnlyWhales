@@ -27,7 +27,7 @@ abstract contract Base is Test {
     address internal dave = makeAddr("dave");
 
     function setUp() public virtual {
-        vm.warp(1_750_000_000);
+        vm.warp(1_750_032_000); // a UTC midnight, so whole-day locks end exactly on time
         usdc = new MockUSDC();
         feed = new MockFeed(8, BNB_PRICE);
         vault = _deploy(300, 250_000e18, 1_000_000e18);
