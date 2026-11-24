@@ -412,7 +412,9 @@ contract SlashTest is Base {
         assertEq(vaultBefore - vaultAfter, payout, "only the payout leaves the vault");
         assertEq(before.totalPrincipal - aft.totalPrincipal, principal);
         assertLe(_pos(bob, pool).earned, aft.rewardReserve, "claims never exceed the reserve");
-        assertEq(vaultAfter, aft.totalPrincipal + aft.rewardReserve + aft.daoOwed, "vault covers what it owes");
+        assertEq(
+            vaultAfter, aft.totalPrincipal + aft.rewardReserve + aft.daoOwed, "vault covers what it owes"
+        );
         if (elapsed >= lock + 1 days) assertEq(slashed, 0);
     }
 }

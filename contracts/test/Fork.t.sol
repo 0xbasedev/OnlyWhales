@@ -54,7 +54,7 @@ contract ForkTest is Test {
         assertEq(vault.positionOf(whale, 0).amount, 291_000e18);
         assertTrue(vault.hasAccess(whale));
 
-        vm.warp(block.timestamp + 30 days);
+        vm.warp(vault.positionOf(whale, 0).lockEnd); // first UTC midnight on or after +30 days
         (uint256 payout, uint256 slashed) = vault.withdraw(0);
         vm.stopPrank();
         assertEq(payout, 291_000e18);

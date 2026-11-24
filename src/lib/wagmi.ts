@@ -6,14 +6,14 @@ const connectors = [
   injected({ shimDisconnect: true }),
   ...(wcProjectId ? [walletConnect({ projectId: wcProjectId, showQrModal: true })] : []),
   // Local anvil only: the node's unlocked accounts, so the whole flow can be driven without
-  // a browser wallet. First account is the operator in DeployLocal.s.sol.
+  // a browser wallet.
   ...(isLocalChain
     ? [
         mock({
-          accounts: [
-            '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
-            '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
-          ],
+          // A funded whale by default; add ?operator to the URL to act as the operator instead.
+          accounts: new URLSearchParams(window.location.search).has('operator')
+            ? ['0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266']
+            : ['0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'],
           features: { reconnect: true },
         }),
       ]

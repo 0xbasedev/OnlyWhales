@@ -224,7 +224,9 @@ contract OnlyWhalesVault is ReentrancyGuard {
         uint256 lockEnd
     );
     event Relocked(address indexed wallet, uint8 indexed pool, uint256 lockEnd, uint256 stakedSeconds);
-    event Withdrawn(address indexed wallet, uint8 indexed pool, uint256 principal, uint256 payout, uint256 slashed);
+    event Withdrawn(
+        address indexed wallet, uint8 indexed pool, uint256 principal, uint256 payout, uint256 slashed
+    );
     event SlashDistributed(uint8 indexed pool, uint256 toDao, uint256 toStakers, uint256 toElders);
     event Claimed(address indexed wallet, uint8 indexed pool, uint256 amount);
     event DaoSwept(uint8 indexed pool, address indexed to, uint256 amount);
@@ -315,7 +317,9 @@ contract OnlyWhalesVault is ReentrancyGuard {
         _deposit(POOL_BNB, msg.sender, msg.value, usdValue, lockDuration);
     }
 
-    function _deposit(uint8 pool, address wallet, uint256 gross, uint256 usdValue, uint256 lockDuration) private {
+    function _deposit(uint8 pool, address wallet, uint256 gross, uint256 usdValue, uint256 lockDuration)
+        private
+    {
         if (lockDuration < MIN_LOCK || lockDuration > MAX_LOCK) revert BadLock();
         Position storage p = _positions[pool][wallet];
         if (p.amount != 0) revert PositionExists();
@@ -558,7 +562,11 @@ contract OnlyWhalesVault is ReentrancyGuard {
     function _earned(Pool storage ps, Position storage p, bool write) private returns (uint256 owed) {
         (uint256 accP, uint256 accQ, uint256 elderAccP, uint256 elderAccQ) = _accumulatorsFor(ps, p);
         owed = TimeWeightedPot.earned(p.weight, p.vstart, accP, accQ, p.snapP, p.snapQ);
-        if (p.elder) owed += TimeWeightedPot.earned(p.weight, p.vstart, elderAccP, elderAccQ, p.elderSnapP, p.elderSnapQ);
+        if (p.elder) {
+            owed += TimeWeightedPot.earned(
+                p.weight, p.vstart, elderAccP, elderAccQ, p.elderSnapP, p.elderSnapQ
+            );
+        }
         if (write) {
             p.snapP = accP;
             p.snapQ = accQ;
@@ -708,10 +716,13 @@ contract OnlyWhalesVault is ReentrancyGuard {
 
     /// @notice BNB/USD from Chainlink. Reverts on a non-positive, incomplete or stale answer.
     function bnbUsdPrice() public view returns (uint256) {
-        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = bnbUsdFeed.latestRoundData();
+        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) =
+            bnbUsdFeed.latestRoundData();
         if (answer <= 0) revert OracleBadPrice();
         if (updatedAt == 0 || answeredInRound < roundId) revert OracleIncompleteRound();
-        if (block.timestamp > updatedAt && block.timestamp - updatedAt > oracleStaleness) revert OracleStale();
+        if (block.timestamp > updatedAt && block.timestamp - updatedAt > oracleStaleness) {
+            revert OracleStale();
+        }
         return uint256(answer);
     }
 
@@ -809,7 +820,9 @@ contract OnlyWhalesVault is ReentrancyGuard {
             ? 5
             : lockDuration >= 730 days
                 ? 4
-                : lockDuration >= 365 days ? 3 : lockDuration >= 180 days ? 2 : lockDuration >= 90 days ? 1 : 0;
+                : lockDuration >= 365 days
+                    ? 3
+                    : lockDuration >= 180 days ? 2 : lockDuration >= 90 days ? 1 : 0;
         return size + lock;
     }
 
@@ -833,8 +846,9 @@ contract OnlyWhalesVault is ReentrancyGuard {
             (uint256 accP, uint256 accQ, uint256 elderAccP, uint256 elderAccQ) = _accumulatorsFor(ps, p);
             v.earned += TimeWeightedPot.earned(p.weight, p.vstart, accP, accQ, p.snapP, p.snapQ);
             if (p.elder) {
-                v.earned +=
-                    TimeWeightedPot.earned(p.weight, p.vstart, elderAccP, elderAccQ, p.elderSnapP, p.elderSnapQ);
+                v.earned += TimeWeightedPot.earned(
+                    p.weight, p.vstart, elderAccP, elderAccQ, p.elderSnapP, p.elderSnapQ
+                );
             }
         }
 

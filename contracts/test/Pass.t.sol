@@ -123,7 +123,10 @@ contract PassTest is Base {
         assertEq(vault.TIER_COUNT(), 10);
     }
 
-    function testFuzz_TierIsMonotonic(uint256 usd, uint256 lock, uint256 moreUsd, uint256 moreLock) public view {
+    function testFuzz_TierIsMonotonic(uint256 usd, uint256 lock, uint256 moreUsd, uint256 moreLock)
+        public
+        view
+    {
         usd = bound(usd, 10_000e18, 1_000_000e18);
         lock = bound(lock, 30 days, 1024 days);
         moreUsd = bound(moreUsd, usd, 1_000_000e18);

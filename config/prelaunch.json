@@ -39,7 +39,7 @@
       "rules.title": "Three rules. No exceptions.",
       "rules.lead": "No pause button. No upgrade key. No one to email.",
       "rules.1.title": "Get in",
-      "rules.1.body": "USDC or BNB. $250,000 minimum, $1,000,000 maximum. 3% deposit fee because who cares.",
+      "rules.1.body": "USDC or BNB. {min} minimum, {max} maximum. {fee} deposit fee because who cares.",
       "rules.2.title": "Stay in",
       "rules.2.body": "Pick a lock. Leave early and lose between 100% and 30% of it. Leave on time and lose nothing.",
       "rules.3.title": "Outlast them",

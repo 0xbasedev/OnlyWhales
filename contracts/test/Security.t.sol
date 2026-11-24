@@ -31,19 +31,26 @@ contract SecurityTest is Base {
         for (uint256 i;; ++i) {
             string memory at = string.concat(".abi[", vm.toString(i), "]");
             if (!vm.keyExistsJson(artifact, at)) break;
-            if (keccak256(bytes(vm.parseJsonString(artifact, string.concat(at, ".type")))) != keccak256("function")) {
+            if (
+                keccak256(bytes(vm.parseJsonString(artifact, string.concat(at, ".type"))))
+                    != keccak256("function")
+            ) {
                 assertFalse(
-                    keccak256(bytes(vm.parseJsonString(artifact, string.concat(at, ".type")))) == keccak256("fallback"),
+                    keccak256(bytes(vm.parseJsonString(artifact, string.concat(at, ".type"))))
+                        == keccak256("fallback"),
                     "no fallback"
                 );
                 assertFalse(
-                    keccak256(bytes(vm.parseJsonString(artifact, string.concat(at, ".type")))) == keccak256("receive"),
+                    keccak256(bytes(vm.parseJsonString(artifact, string.concat(at, ".type"))))
+                        == keccak256("receive"),
                     "no receive"
                 );
                 continue;
             }
             string memory mut = vm.parseJsonString(artifact, string.concat(at, ".stateMutability"));
-            if (keccak256(bytes(mut)) == keccak256("view") || keccak256(bytes(mut)) == keccak256("pure")) continue;
+            if (keccak256(bytes(mut)) == keccak256("view") || keccak256(bytes(mut)) == keccak256("pure")) {
+                continue;
+            }
             string memory fn = vm.parseJsonString(artifact, string.concat(at, ".name"));
             bool found;
             for (uint256 j; j < allowed.length; ++j) {
@@ -109,9 +116,15 @@ contract SecurityTest is Base {
         ];
         _assertNoneExist(sigs);
         // EIP-1967 implementation, admin and beacon slots are empty.
-        assertEq(vm.load(address(vault), 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc), 0);
-        assertEq(vm.load(address(vault), 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103), 0);
-        assertEq(vm.load(address(vault), 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50), 0);
+        assertEq(
+            vm.load(address(vault), 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc), 0
+        );
+        assertEq(
+            vm.load(address(vault), 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103), 0
+        );
+        assertEq(
+            vm.load(address(vault), 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50), 0
+        );
     }
 
     function test_OperatorIsImmutable() public {
@@ -239,7 +252,9 @@ contract SecurityTest is Base {
         assertEq(whale.blocked(), 6, "every re-entry bounced");
         assertEq(whale.lastError(), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
         assertEq(_pos(address(whale), BNB).amount, 0);
-        assertApproxEqAbs(address(whale).balance, principal - (principal * slashWad) / 1e18, 1, "paid exactly once");
+        assertApproxEqAbs(
+            address(whale).balance, principal - (principal * slashWad) / 1e18, 1, "paid exactly once"
+        );
 
         OnlyWhalesVault.PoolView memory pool = _pool(BNB);
         assertEq(address(vault).balance, pool.totalPrincipal + pool.rewardReserve + pool.daoOwed);
