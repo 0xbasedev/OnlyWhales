@@ -65,7 +65,8 @@ export function AccessCard({ wallet }: { wallet: WalletState }) {
 
           {state.phase === 'open' ? (
             <div className="invite">
-              <code>{state.invite}</code>
+              {/* A bot link carries a one-time code. Telling the whale what happens next beats showing it. */}
+              {state.invite.includes('?start=') ? <span>Opens our bot. Tap Start and it lets you in.</span> : <code>{state.invite}</code>}
               <a className="btn sm primary" href={state.invite} target="_blank" rel="noreferrer noopener">
                 Open Telegram
               </a>

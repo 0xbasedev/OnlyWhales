@@ -3,5 +3,25 @@
   "framework": "vite",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
-  "rewrites": [{ "source": "/((?!api/|assets/|pass/).*)", "destination": "/index.html" }]
+  "rewrites": [
+    {
+      "source": "/((?!api/|assets/|pass/).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "functions": {
+    "api/telegram-sweep.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "schedule/v1beta"
+        }
+      ]
+    }
+  },
+  "schedules": {
+    "telegram-sweep": {
+      "schedule": "*/15 * * * *",
+      "function": "api/telegram-sweep"
+    }
+  }
 }

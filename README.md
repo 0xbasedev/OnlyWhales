@@ -16,7 +16,7 @@ A whale vault on BNB Smart Chain. Lock USDC or BNB, pay the fee, get a soulbound
 | `contracts/src/lib/` | `TimeWeightedPot` (O(1) time-weighted payouts), `Timelocked` (self-executing delay) |
 | `contracts/test/` | Foundry suite: unit, fuzz, invariant, regression, mainnet fork |
 | `config/prelaunch.json` | Everything set at deploy, plus default site copy |
-| `server/`, `api/` | Access gate and branding API (Vercel functions; same handlers run in `vite dev`) |
+| `server/`, `api/` | Access gate, Telegram bot and branding API (Vercel functions; same handlers run in `vite dev`) |
 | `src/` | Vite + React + wagmi/viem + GSAP frontend |
 
 ## Run it
@@ -66,12 +66,38 @@ These came out of an adversarial review and are deliberate:
 3. `forge script contracts/script/Deploy.s.sol --rpc-url $RPC_URL --broadcast` (testnet first: set `network.chainId` to 97 and testnet addresses).
 4. Set environment variables (see `.env.example`):
    - `VITE_CHAIN_ID`, `VITE_VAULT_ADDRESS` (public)
-   - `TELEGRAM_INVITE_LINK`, `RPC_URL` (server only; never `VITE_`-prefixed)
+   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_CHAT_ID`, `TELEGRAM_SECRET` for the bot, or `TELEGRAM_INVITE_LINK` without it, and `RPC_URL` (server only; never `VITE_`-prefixed)
    - a Vercel Blob store (`BLOB_READ_WRITE_TOKEN`) or `BRANDING_FILE` on a persistent disk
 
 ### The Telegram gate
 
-`POST /api/access { wallet, timestamp, signature }`. The server rebuilds the message from its own vault address and chain id, rejects timestamps older than five minutes, verifies the signature (EOA or ERC-1271), calls `hasAccess(wallet)` on-chain, and only then returns `TELEGRAM_INVITE_LINK`. The link is not in the bundle. It is a shared link: anyone who receives it can forward it, so pair it with a Telegram bot that approves join requests if you need per-wallet enforcement.
+`POST /api/access { wallet, timestamp, signature }`. The server rebuilds the message from its own vault address and chain id, rejects timestamps older than five minutes, verifies the signature (EOA or ERC-1271) and calls `hasAccess(wallet)` on-chain. Only then does it return an invite:
+
+- **With the bot** (all four `TELEGRAM_*` bot values set): a link to the bot carrying a start code for this wallet, signed with `TELEGRAM_SECRET`, valid for 10 minutes, usable once.
+- **Without it**: `TELEGRAM_INVITE_LINK`, a shared link anyone can forward.
+
+### The Telegram bot
+
+`server/telegram.ts`. It enforces one wallet per seat inside the group:
+
+1. The whale taps Start. The bot ties that Telegram account to the wallet and sends a join link.
+2. The join link only asks to join. The bot approves accounts tied to a wallet where `hasAccess` is true and declines everyone else, so a forwarded link gets nobody in.
+3. Every 15 minutes (`api/telegram-sweep.ts`, a private Vercel schedule) it re-checks every member. A wallet that lost access loses its seat and can come back by depositing again.
+4. One wallet, one seat: tying a wallet to a second account removes the first. `/status` in a private chat shows a member their own position. The bot never reads or answers the group.
+
+It only removes accounts it let in itself, so admins and anyone added by hand are left alone. If the chain cannot be read it admits nobody and removes nobody. The members file (Telegram id to wallet) is encrypted with a key derived from `TELEGRAM_SECRET` before it goes to Blob or disk; changing the secret makes it unreadable.
+
+Set it up:
+
+1. Message @BotFather, `/newbot`. Note the token and the username.
+2. Make the group a private supergroup. Add the bot as an admin with **Invite users via link** and **Ban users**.
+3. Get the group id: send a message in the group, then open `https://api.telegram.org/bot<token>/getUpdates` and read `chat.id`.
+4. `TELEGRAM_SECRET`: `openssl rand -hex 32`.
+5. Set the four values in Vercel, deploy, then point Telegram at the site:
+   `node --env-file=.env.local scripts/telegram-webhook.mjs set https://your-site`
+   (`info` shows the last delivery error, `delete` removes the webhook).
+
+Locally, `pnpm dev` with the four values set runs the bot by polling, since Telegram cannot reach localhost. Use a separate test bot: a bot with a webhook set cannot poll, and dev stops rather than remove it. `node scripts/telegram-e2e.mjs` (with `pnpm chain` running) runs the whole flow against the local vault with a stand-in for Telegram.
 
 ### Operator page
 
@@ -79,5 +105,6 @@ These came out of an adversarial review and are deliberate:
 
 ## Not verified here
 
-- The Vercel deployment path (`api/*.ts`, Blob storage). The handlers are unit-tested and exercised through the dev server, but nothing was deployed to Vercel.
+- The Vercel deployment path (`api/*.ts`, Blob storage, the `telegram-sweep` schedule). The handlers are unit-tested and exercised through the dev server, but nothing was deployed to Vercel.
+- The bot against real Telegram. It was run end to end against the local vault with a stand-in for the Bot API.
 - WalletConnect (needs `VITE_WC_PROJECT_ID`) and real browser wallets; the browser runs used the local test wallet.

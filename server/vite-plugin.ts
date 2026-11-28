@@ -3,6 +3,7 @@ import type { Plugin } from 'vite'
 import { handleAccess } from './access.js'
 import { handleBrandingGet, handleBrandingPost } from './branding.js'
 import type { Reply, ServerEnv } from './env.js'
+import { startPolling } from './telegram-env.js'
 
 function readBody(req: IncomingMessage, max = 2_000_000): Promise<unknown> {
   return new Promise((resolve) => {
@@ -40,7 +41,14 @@ export function apiPlugin(env: ServerEnv): Plugin {
   }
   return {
     name: 'onlywhales-api',
-    configureServer: (server) => void server.middlewares.use(middleware),
+    configureServer: (server) => {
+      server.middlewares.use(middleware)
+      // Telegram cannot reach localhost, so in dev the bot polls instead of using the webhook.
+      if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_POLL !== 'off') {
+        const stop = startPolling(env, (line) => server.config.logger.info(line))
+        server.httpServer?.once('close', stop)
+      }
+    },
     configurePreviewServer: (server) => void server.middlewares.use(middleware),
   }
 }

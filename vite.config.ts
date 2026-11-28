@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import { apiPlugin } from './server/vite-plugin.js'
 
 export default defineConfig(({ mode }) => {
-  // Server-side secrets (TELEGRAM_INVITE_LINK, RPC_URL) are read here for the dev API only.
+  // Server-side secrets (TELEGRAM_*, RPC_URL) are read here for the dev API and dev bot only.
   // Only VITE_* values are ever exposed to the browser bundle.
   const env = { ...process.env, ...loadEnv(mode, process.cwd(), '') }
   return {
